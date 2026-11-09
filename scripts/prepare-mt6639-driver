@@ -1,0 +1,29 @@
+#!/usr/bin/python3
+"""Stage a device-ID correction against verified Linux 6.12.115 sources."""
+import hashlib
+import json
+from pathlib import Path
+import shutil
+import subprocess
+import urllib.request
+
+root = Path(__file__).resolve().parents[1]
+output = root / "local/dkms/airpods-btusb-1.0"
+output.mkdir(parents=True, exist_ok=True)
+checksums = json.loads((root / "drivers/mt6639/source-sha256.json").read_text())
+for filename, expected in checksums.items():
+    url = f"https://raw.githubusercontent.com/gregkh/linux/v6.12.115/drivers/bluetooth/{filename}"
+    with urllib.request.urlopen(url, timeout=30) as response:
+        content = response.read()
+    if hashlib.sha256(content).hexdigest() != expected:
+        raise SystemExit(f"Upstream source checksum mismatch: {filename}")
+    (output / filename).write_bytes(content)
+subprocess.run(["patch", "--batch", "-d", str(output), "-p1", "-i",
+                str(root / "patches/0001-btusb-asus-mt6639-device-id.patch")], check=True)
+(output / "Makefile").write_text("obj-m += btusb.o\n")
+shutil.copy2(root / "drivers/mt6639/dkms.conf", output / "dkms.conf")
+filenames = [*checksums, "Makefile", "dkms.conf"]
+manifest = {name: hashlib.sha256((output / name).read_bytes()).hexdigest()
+            for name in filenames}
+(output / "source-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+print(f"Verified DKMS sources prepared at {output}")

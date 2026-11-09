@@ -1,0 +1,70 @@
+#!/usr/bin/python3
+"""Report motherboard Bluetooth support without changing settings or exposing addresses."""
+import hashlib
+import json
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+if "--help" in sys.argv:
+    print(__doc__)
+    raise SystemExit(0)
+
+
+def command(*arguments):
+    try:
+        result = subprocess.run(arguments, capture_output=True, text=True, timeout=10)
+        return result.stdout.strip() if result.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+report = {
+    "board": Path("/sys/devices/virtual/dmi/id/board_name").read_text().strip(),
+    "running_kernel": command("uname", "-r"),
+    "resolved_btusb_module": command("/usr/sbin/modinfo", "-n", "btusb"),
+    "loaded_btusb_srcversion": None,
+    "firmware_present": False,
+    "firmware_sha256_matches": False,
+    "adapters": [],
+}
+version = Path("/sys/module/btusb/srcversion")
+if version.exists():
+    report["loaded_btusb_srcversion"] = version.read_text().strip()
+firmware = Path("/usr/lib/firmware/mediatek/mt7927/BT_RAM_CODE_MT6639_2_1_hdr.bin")
+if firmware.exists():
+    report["firmware_present"] = True
+    report["firmware_sha256_matches"] = hashlib.sha256(firmware.read_bytes()).hexdigest() == (
+        "669c5c99a0c59c85c1285d3d1b8b31915c2d31341a2244f4eddcbfd60ffbbc76")
+objects = {}
+try:
+    import dbus
+    bus = dbus.SystemBus()
+    objects = dbus.Interface(bus.get_object("org.bluez", "/"),
+                             "org.freedesktop.DBus.ObjectManager").GetManagedObjects()
+except Exception as error:
+    report["bluez_query_error"] = type(error).__name__
+for adapter in sorted(Path("/sys/class/bluetooth").glob("hci*")):
+    if not re.fullmatch(r"hci\d+", adapter.name):
+        continue
+    base = adapter / "device/.."
+    try:
+        usb_id = (base / "idVendor").read_text().strip() + ":" + (base / "idProduct").read_text().strip()
+    except OSError:
+        continue
+    properties = objects.get("/org/bluez/" + adapter.name, {}).get("org.bluez.Adapter1", {})
+    address = str(properties.get("Address", ""))
+    report["adapters"].append({
+        "controller": adapter.name,
+        "usb_id": usb_id,
+        "is_target_onboard_adapter": usb_id == "0489:e13a",
+        "visible_to_bluez": bool(properties),
+        "address_initialized": bool(address) and address != "00:00:00:00:00:00",
+        "powered": bool(properties.get("Powered", False)),
+    })
+print(json.dumps(report, indent=2))
+healthy = report["firmware_sha256_matches"] and any(
+    item["is_target_onboard_adapter"] and item["address_initialized"] and item["powered"]
+    for item in report["adapters"])
+raise SystemExit(0 if healthy else 1)

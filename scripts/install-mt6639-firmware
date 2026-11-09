@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ $EUID -ne 0 ]]; then
+    printf 'Run this installer with sudo in your desktop terminal.\n' >&2
+    exit 1
+fi
+root=$(cd -- "$(dirname -- "$0")/.." && pwd)
+source_file="$root/local/firmware/BT_RAM_CODE_MT6639_2_1_hdr.bin"
+destination=/usr/lib/firmware/mediatek/mt7927/BT_RAM_CODE_MT6639_2_1_hdr.bin
+expected=669c5c99a0c59c85c1285d3d1b8b31915c2d31341a2244f4eddcbfd60ffbbc76
+actual=$(sha256sum -- "$source_file")
+if [[ ${actual%% *} != "$expected" ]]; then
+    printf 'Firmware checksum mismatch; no changes made.\n' >&2
+    exit 1
+fi
+if [[ -e "$destination" ]] && ! cmp -s -- "$source_file" "$destination"; then
+    backup="/var/lib/airpods-xfce/firmware-backups/$(date -u +%Y%m%dT%H%M%SZ)"
+    install -d -m 0700 "$backup"
+    cp -a -- "$destination" "$backup/"
+    printf 'Previous firmware saved in %s\n' "$backup"
+fi
+install -D -o root -g root -m 0644 -- "$source_file" "$destination"
+update-initramfs -u -k all
+sha256sum -- "$destination"
+printf '\nMT6639 firmware is installed. No kernel modules were replaced or reloaded.\n'
+printf 'The adapter still requires the correct btusb device-ID handling.\n'

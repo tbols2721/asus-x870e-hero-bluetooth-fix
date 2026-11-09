@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ $EUID -ne 0 ]]; then
+    printf 'Run this installer with sudo in your desktop terminal.\n' >&2
+    exit 1
+fi
+root=$(cd -- "$(dirname -- "$0")/.." && pwd)
+staged="$root/local/dkms/airpods-btusb-1.0"
+kernel=$(uname -r)
+targets=(6.12.115+deb13.1-amd64 6.12.116+deb13-amd64)
+[[ "$kernel" == "${targets[0]}" || "$kernel" == "${targets[1]}" ]] || {
+    printf 'This fix is verified only for the two recorded Debian kernel ABIs.\n' >&2; exit 1;
+}
+[[ $(cat /sys/devices/virtual/dmi/id/board_name) == 'ROG CROSSHAIR X870E HERO' ]] || {
+    printf 'This installer targets the verified ASUS X870E Hero board.\n' >&2; exit 1;
+}
+/usr/bin/python3 -I - "$staged" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+source = Path(sys.argv[1])
+manifest = json.loads((source / 'source-manifest.json').read_text())
+required = {'btusb.c', 'btintel.h', 'btbcm.h', 'btrtl.h', 'btmtk.h', 'Makefile', 'dkms.conf'}
+if set(manifest) != required:
+    raise SystemExit('The source manifest does not contain the exact required files')
+for name, expected in manifest.items():
+    if Path(name).name != name or hashlib.sha256((source / name).read_bytes()).hexdigest() != expected:
+        raise SystemExit('Staged driver source validation failed: ' + name)
+for path in Path('/sys/firmware/efi/efivars').glob('SecureBoot-*'):
+    if path.read_bytes()[4]:
+        raise SystemExit('Secure Boot is enabled; configure module signing before installation')
+firmware = Path('/usr/lib/firmware/mediatek/mt7927/BT_RAM_CODE_MT6639_2_1_hdr.bin')
+if hashlib.sha256(firmware.read_bytes()).hexdigest() != '669c5c99a0c59c85c1285d3d1b8b31915c2d31341a2244f4eddcbfd60ffbbc76':
+    raise SystemExit('Install the verified MT6639 firmware first')
+PY
+[[ ! -e /usr/src/airpods-btusb-1.0 && ! -e /var/lib/dkms/airpods-btusb/1.0 ]] || {
+    printf 'DKMS source or state already exists; inspect it before replacing it.\n' >&2; exit 1;
+}
+apt-get install -y --no-install-recommends --no-remove dkms \
+    "linux-headers-${targets[0]}" "linux-headers-${targets[1]}"
+source_created=no
+registration_attempted=no
+reload_attempted=no
+rollback() {
+    status=$?
+    trap - ERR
+    set +e
+    printf '\nDriver installation failed. Restoring the stock driver.\n' >&2
+    if [[ "$reload_attempted" == yes ]]; then
+        systemctl stop bluetooth
+        modprobe -r btusb
+    fi
+    if [[ "$registration_attempted" == yes ]]; then
+        if ! dkms remove -m airpods-btusb -v 1.0 --all; then
+            source_created=no
+            printf 'DKMS cleanup failed; preserving its sources for recovery.\n' >&2
+        fi
+    fi
+    if [[ "$source_created" == yes ]]; then
+        rm -rf -- /usr/src/airpods-btusb-1.0
+    fi
+    for target in "${targets[@]}"; do depmod -a "$target"; done
+    modprobe btusb
+    systemctl start bluetooth
+    printf 'Resolved driver: %s\n' "$(modinfo -n btusb)" >&2
+    exit "$status"
+}
+trap rollback ERR
+install -d -m 0755 /usr/src/airpods-btusb-1.0
+source_created=yes
+for file in btusb.c btintel.h btbcm.h btrtl.h btmtk.h Makefile dkms.conf source-manifest.json; do
+    install -o root -g root -m 0644 "$staged/$file" "/usr/src/airpods-btusb-1.0/$file"
+done
+/usr/bin/python3 -I - <<'PY'
+import hashlib, json
+from pathlib import Path
+source = Path('/usr/src/airpods-btusb-1.0')
+manifest = json.loads((source / 'source-manifest.json').read_text())
+for name, expected in manifest.items():
+    if hashlib.sha256((source / name).read_bytes()).hexdigest() != expected:
+        raise SystemExit('Root-owned source copy failed verification: ' + name)
+PY
+registration_attempted=yes
+dkms add -m airpods-btusb -v 1.0
+for target in "${targets[@]}"; do
+    dkms build -m airpods-btusb -v 1.0 -k "$target"
+done
+for target in "${targets[@]}"; do
+    dkms install --force -m airpods-btusb -v 1.0 -k "$target"
+done
+printf '\nReloading the Bluetooth USB driver; Bluetooth devices will disconnect briefly.\n'
+reload_attempted=yes
+systemctl stop bluetooth
+modprobe -r btusb
+modprobe btusb
+udevadm settle --timeout=15
+systemctl start bluetooth
+resolved=$(modinfo -n btusb)
+expected_version=$(modinfo -F srcversion btusb)
+loaded_version=$(cat /sys/module/btusb/srcversion)
+[[ "$resolved" == /lib/modules/"$kernel"/updates/dkms/* || \
+   "$resolved" == /usr/lib/modules/"$kernel"/updates/dkms/* ]]
+[[ "$expected_version" == 29AC947EAFB09F046C1A14A && "$loaded_version" == "$expected_version" ]]
+trap - ERR
+printf '\nVerified loaded patched module: %s\n' "$loaded_version"
+printf '\nInstalled DKMS driver\n'
+dkms status -m airpods-btusb
+printf '\nBluetooth controller status\n'
+/usr/bin/python3 -I - <<'PY'
+import re, time
+from pathlib import Path
+import dbus
+bus = dbus.SystemBus()
+deadline = time.monotonic() + 30
+last_error = ''
+while time.monotonic() < deadline:
+    try:
+        objects = dbus.Interface(bus.get_object('org.bluez', '/'), 'org.freedesktop.DBus.ObjectManager').GetManagedObjects()
+    except dbus.DBusException as error:
+        last_error = str(error)
+        time.sleep(.5)
+        continue
+    for adapter in Path('/sys/class/bluetooth').iterdir():
+        if not re.fullmatch(r'hci\d+', adapter.name):
+            continue
+        try:
+            vendor = (adapter / 'device/../idVendor').read_text().strip()
+            product = (adapter / 'device/../idProduct').read_text().strip()
+        except OSError:
+            continue
+        if (vendor, product) != ('0489', 'e13a'):
+            continue
+        path = '/org/bluez/' + adapter.name
+        properties = objects.get(path, {}).get('org.bluez.Adapter1', {})
+        address = str(properties.get('Address', ''))
+        if address and address != '00:00:00:00:00:00':
+            try:
+                dbus.Interface(bus.get_object('org.bluez', path), 'org.freedesktop.DBus.Properties').Set(
+                    'org.bluez.Adapter1', 'Powered', dbus.Boolean(True))
+            except dbus.DBusException as error:
+                last_error = str(error)
+                continue
+            print('Onboard MediaTek controller initialized:', adapter.name, address)
+            raise SystemExit(0)
+    time.sleep(.5)
+raise SystemExit('Patched driver loaded, but the onboard controller did not initialize. Keep the installed fix and perform a full power-off before retrying. ' + last_error)
+PY
+printf '\nRecent controller initialization messages\n'
+journalctl -k --since '2 minutes ago' --no-pager | tail -45

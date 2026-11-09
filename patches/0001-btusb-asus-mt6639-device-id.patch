@@ -1,0 +1,13 @@
+--- a/btusb.c
++++ b/btusb.c
+@@ -629,6 +629,10 @@
+ 	  .driver_info = BTUSB_MEDIATEK |
+ 			 BTUSB_WIDEBAND_SPEECH },
+ 
++	/* ASUS ROG Crosshair X870E Hero, MT7927/MT6639. */
++	{ USB_DEVICE(0x0489, 0xe13a), .driver_info = BTUSB_MEDIATEK |
++						     BTUSB_WIDEBAND_SPEECH },
++
+ 	/* Additional MediaTek MT7615E Bluetooth devices */
+ 	{ USB_DEVICE(0x13d3, 0x3560), .driver_info = BTUSB_MEDIATEK},
+ 

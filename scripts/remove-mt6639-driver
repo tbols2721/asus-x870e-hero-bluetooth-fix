@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[[ $EUID -eq 0 ]] || { printf 'Run with sudo.\n' >&2; exit 1; }
+recover() {
+    status=$?
+    trap - EXIT
+    set +e
+    modprobe btusb
+    systemctl start bluetooth
+    printf 'Resolved driver: %s\n' "$(modinfo -n btusb)"
+    exit "$status"
+}
+trap recover EXIT
+systemctl stop bluetooth
+modprobe -r btusb
+dkms remove -m airpods-btusb -v 1.0 --all
+rm -rf -- /usr/src/airpods-btusb-1.0
+modprobe btusb
+systemctl start bluetooth
+[[ $(modinfo -n btusb) != */updates/dkms/* ]]
+printf 'The stock Bluetooth USB driver is active. The verified firmware was retained.\n'

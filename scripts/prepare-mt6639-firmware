@@ -1,0 +1,51 @@
+#!/usr/bin/python3
+"""Extract the MT6639 Bluetooth payload from a verified ASUS driver archive."""
+import hashlib
+from pathlib import Path
+import struct
+import urllib.request
+import zipfile
+
+root = Path(__file__).resolve().parents[1]
+directory = root / "local/firmware"
+directory.mkdir(parents=True, exist_ok=True)
+archive_path = directory / "asus-mtk-5.6.0.3998.zip"
+url = ("https://dlcdnets.asus.com/pub/ASUS/mb/08WIRELESS/"
+       "DRV_WiFi_MTK_MT7925_MT7927_TP_W11_64_V5603998_20250709R.zip")
+archive_hash = "b377fffa28208bb1671a0eb219c84c62fba4cd6f92161b74e4b0909476307cc8"
+firmware_hash = "669c5c99a0c59c85c1285d3d1b8b31915c2d31341a2244f4eddcbfd60ffbbc76"
+filename = "BT_RAM_CODE_MT6639_2_1_hdr.bin"
+
+if not archive_path.exists():
+    with urllib.request.urlopen(url, timeout=60) as response:
+        archive_path.write_bytes(response.read())
+if hashlib.sha256(archive_path.read_bytes()).hexdigest() != archive_hash:
+    raise SystemExit("ASUS archive checksum differs from its official support listing")
+with zipfile.ZipFile(archive_path) as archive:
+    containers = [name for name in archive.namelist() if name.lower().endswith("mtkwlan.dat")]
+    if len(containers) != 1:
+        raise SystemExit("Expected one mtkwlan.dat firmware container")
+    data = archive.read(containers[0])
+
+# Entry: null-padded filename, a 14-digit timestamp, then aligned little-endian offset and size.
+name = filename.encode("ascii")
+position = data.find(name)
+if position < 0:
+    raise SystemExit("The archive has no MT6639 Bluetooth firmware entry")
+position += len(name)
+while position < len(data) and data[position] == 0:
+    position += 1
+if data[position:position + 14].isdigit():
+    position += 14
+position = (position + 3) & ~3
+if position + 8 > len(data):
+    raise SystemExit("The firmware entry is truncated")
+offset, size = struct.unpack_from("<II", data, position)
+if size == 0 or offset > len(data) or size > len(data) - offset:
+    raise SystemExit("The firmware entry has invalid bounds")
+firmware = data[offset:offset + size]
+if hashlib.sha256(firmware).hexdigest() != firmware_hash:
+    raise SystemExit("The extracted firmware checksum differs from the verified payload")
+output = directory / filename
+output.write_bytes(firmware)
+print(f"Verified firmware: {output} ({size} bytes)")

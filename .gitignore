@@ -1,0 +1,11 @@
+/local/
+/build/
+__pycache__/
+*.pyc
+*.log
+*.ko
+*.ko.xz
+*.ko.zst
+*.zip
+*.deb
+*.bin

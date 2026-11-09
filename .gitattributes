@@ -1,0 +1,2 @@
+# Unified diff context retains leading spaces and the kernel's tab indentation.
+*.patch -whitespace
