@@ -9,3 +9,14 @@ __pycache__/
 *.zip
 *.deb
 *.bin
+# Local captures and credentials must not enter publication history.
+*.btsnoop
+*.pcap
+*.pcapng
+*.wav
+*.pcm
+*.raw
+*.pem
+*.key
+.env
+.env.*
